@@ -5,8 +5,9 @@
 
 .DESCRIPTION
     Controlla lo stato dei servizi Evo4Web specificati nel file di configurazione
-    JSON e li riavvia se non sono in esecuzione. Scrive log giornalieri nella
-    cartella configurata.
+    JSON. Per ogni servizio che NON risulti in stato Running lo forza in Stopped
+    (anche se in StartPending/StopPending/Paused) e lo riavvia. Serve a sbloccare
+    servizi rimasti in stallo. Scrive log giornalieri nella cartella configurata.
 
     Pensato per essere eseguito da Task Scheduler con privilegi elevati.
 
@@ -22,7 +23,7 @@
 
 .NOTES
     Autore  : Daniele Oppezzo
-    Versione: 1.1
+    Versione: 1.2
 #>
 
 [CmdletBinding()]
@@ -191,9 +192,16 @@ Write-Log -Level INFO    -Message "Log file: $script:LogFile"
 Write-Log -Level INFO    -Message "Servizi configurati: $($services -join ', ')"
 
 # --- Loop principale -------------------------------------------------------
+# Strategia: per ogni servizio che NON e' gia' Running, lo si forza
+# SEMPRE in stato Stopped e poi lo si riavvia. Serve a sbloccare situazioni
+# di stallo (StartPending, StopPending, Paused, ecc.) in cui il servizio
+# non sta effettivamente lavorando ma non e' neppure propriamente "Stopped".
 $restarted = 0
 $failed    = 0
-$skipped   = 0
+$already   = 0
+
+$stopWait  = New-TimeSpan -Seconds $timeout
+$startWait = New-TimeSpan -Seconds $timeout
 
 foreach ($svc in $services) {
     $service = Get-Service -Name $svc -ErrorAction SilentlyContinue
@@ -204,41 +212,66 @@ foreach ($svc in $services) {
         continue
     }
 
-    if ($service.Status -eq 'Running') {
-        Write-Log -Level INFO -Message "Servizio '$svc' gia' in esecuzione (stato: $($service.Status)). Nessuna azione."
-        $skipped++
+    $currentStatus = $service.Status
+    Write-Log -Level INFO -Message "Stato attuale di '$svc': $currentStatus"
+
+    if ($currentStatus -eq 'Running') {
+        Write-Log -Level INFO -Message "Servizio '$svc' gia' Running. Nessuna azione necessaria."
+        $already++
         continue
     }
 
-    Write-Log -Level WARN -Message "Servizio '$svc' non in esecuzione (stato attuale: $($service.Status)). Tentativo di restart..."
+    # Il servizio NON sta girando. Forza il reset completo:
+    # 1) Stop (anche se e' in StartPending/StopPending/Paused) con -Force
+    # 2) Attesa che diventi Stopped
+    # 3) Start
+    # 4) Attesa che diventi Running
+    Write-Log -Level WARN -Message "Servizio '$svc' non Running (stato: $currentStatus). Forzo stop + start per sbloccare eventuali stalli."
 
     try {
-        if ($service.Status -eq 'Stopped') {
-            Start-Service -Name $svc -ErrorAction Stop
-            $action = 'avviato'
-        } else {
-            Restart-Service -Name $svc -Force -ErrorAction Stop
-            $action = 'riavviato'
+        # 1) Stop forzato
+        try {
+            Stop-Service -Name $svc -Force -ErrorAction Stop
+            Write-Log -Level INFO -Message "Comando Stop-Service inviato a '$svc'."
+        } catch {
+            # Se il servizio e' gia' Stopped, l'errore non e' bloccante.
+            $service.Refresh()
+            if ($service.Status -ne 'Stopped') { throw }
+            Write-Log -Level INFO -Message "Servizio '$svc' gia' in stato Stopped, skip stop."
         }
 
-        $wait = New-TimeSpan -Seconds $timeout
-        $service.WaitForStatus('Running', $wait) | Out-Null
+        # 2) Attesa Stopped
+        $service.Refresh()
+        $service.WaitForStatus('Stopped', $stopWait) | Out-Null
+        $service.Refresh()
+
+        if ($service.Status -ne 'Stopped') {
+            throw "Timeout o stato inatteso dopo Stop: $($service.Status)"
+        }
+        Write-Log -Level INFO -Message "Servizio '$svc' confermato Stopped."
+
+        # 3) Start
+        Start-Service -Name $svc -ErrorAction Stop
+        Write-Log -Level INFO -Message "Comando Start-Service inviato a '$svc'."
+
+        # 4) Attesa Running
+        $service.WaitForStatus('Running', $startWait) | Out-Null
         $service.Refresh()
 
         if ($service.Status -eq 'Running') {
-            Write-Log -Level SUCCESS -Message "Servizio '$svc' $action con successo. Stato finale: $($service.Status)."
+            Write-Log -Level SUCCESS -Message "Servizio '$svc' riavviato con successo (era $currentStatus, ora Running). Stallo risolto."
             $restarted++
         } else {
-            Write-Log -Level ERROR -Message "Servizio '$svc' $action ma lo stato finale non e' Running: $($service.Status)."
+            Write-Log -Level ERROR -Message "Servizio '$svc' riavviato ma lo stato finale non e' Running: $($service.Status)."
             $failed++
         }
     } catch {
-        Write-Log -Level ERROR -Message "Errore durante il restart di '$svc': $($_.Exception.Message)"
+        Write-Log -Level ERROR -Message "Errore durante il ciclo stop+start di '$svc': $($_.Exception.Message)"
         $failed++
     }
 }
 
-Write-Log -Level INFO -Message "==== Ciclo terminato. Riavviati=$restarted Gia'Running=$skipped Falliti=$failed ===="
+Write-Log -Level INFO -Message "==== Ciclo terminato. Riavviati=$restarted Gia'Running=$already Falliti=$failed ===="
 
 # --- Retention log ---------------------------------------------------------
 try {

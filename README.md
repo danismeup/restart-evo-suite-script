@@ -1,7 +1,9 @@
 # Evo4Web Services Monitor
 
 Script PowerShell schedulato che controlla lo stato dei servizi Windows
-`Evo4Web - Engine*` e li riavvia automaticamente quando non sono in esecuzione.
+`Evo4Web - Engine*`. Per ogni servizio che non risulti `Running` forza lo
+**stop** (anche se è in `StartPending` / `StopPending` / `Paused`) e poi lo
+**riavvia** da zero, in modo da sbloccare situazioni di stallo.
 Scrive log giornalieri con rotazione automatica.
 
 ---
@@ -193,9 +195,13 @@ Evo4WebServices-20260908.log
 ```
 2026-09-07 14:32:00 [INFO]    ==== Avvio ciclo di monitoraggio servizi Evo4Web ====
 2026-09-07 14:32:00 [INFO]    Servizi configurati: Evo4Web - EngineB2B, Evo4Web - EnginePaNotifiche, ...
-2026-09-07 14:32:01 [WARN]    Servizio 'Evo4Web - EngineB2B' non in esecuzione (stato: Stopped). Tentativo di restart...
-2026-09-07 14:32:04 [SUCCESS] Servizio 'Evo4Web - EngineB2B' avviato con successo. Stato finale: Running.
-2026-09-07 14:32:05 [INFO]    ==== Ciclo terminato. Riavviati=1 Gia'Running=2 Falliti=0 ====
+2026-09-07 14:32:01 [INFO]    Stato attuale di 'Evo4Web - EngineB2B': StopPending
+2026-09-07 14:32:01 [WARN]    Servizio 'Evo4Web - EngineB2B' non Running (stato: StopPending). Forzo stop + start per sbloccare eventuali stalli.
+2026-09-07 14:32:01 [INFO]    Comando Stop-Service inviato a 'Evo4Web - EngineB2B'.
+2026-09-07 14:32:03 [INFO]    Servizio 'Evo4Web - EngineB2B' confermato Stopped.
+2026-09-07 14:32:03 [INFO]    Comando Start-Service inviato a 'Evo4Web - EngineB2B'.
+2026-09-07 14:32:06 [SUCCESS] Servizio 'Evo4Web - EngineB2B' riavviato con successo (era StopPending, ora Running). Stallo risolto.
+2026-09-07 14:32:07 [INFO]    ==== Ciclo terminato. Riavviati=1 Gia'Running=2 Falliti=0 ====
 ```
 
 ### Livelli
@@ -288,12 +294,15 @@ quella macchina. Apri `services.msc`, cerca il servizio e copia il
 
 - Lo script esegue un singolo controllo puntuale per esecuzione. Non è un
   watchdog continuo: più trigger frequenti = più controlli ravvicinati.
-- Non distingue tra *crash* e *arresto intenzionale*: riavvia comunque.
-  Se vuoi escludere alcuni servizi dal restart automatico, toglili dal
-  JSON.
+- Lo stop è forzato con `-Force` perché l'obiettivo è proprio sbloccare
+  stalli. Se vuoi escludere alcuni servizi da questa logica aggressiva,
+  toglili dal JSON.
 - Se tutti i servizi si spengono in contemporanea e dipendono l'uno
   dall'altro, l'avvio potrebbe richiedere più di un'esecuzione. In quel
   caso abbassa l'intervallo del trigger (es. 1-2 minuti).
+- Lo script non distingue crash da fermo intenzionale per i servizi che
+  sono in `Stopped` "puro": li riavvia comunque. In un contesto gestito
+  è il comportamento desiderato.
 
 ---
 
