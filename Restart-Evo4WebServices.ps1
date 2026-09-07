@@ -4,10 +4,10 @@
     Restart automatico di servizi Evo4Web con logging strutturato.
 
 .DESCRIPTION
-    Controlla lo stato dei servizi Evo4Web specificati nel file di configurazione
-    JSON. Per ogni servizio che NON risulti in stato Running lo forza in Stopped
-    (anche se in StartPending/StopPending/Paused) e lo riavvia. Serve a sbloccare
-    servizi rimasti in stallo. Scrive log giornalieri nella cartella configurata.
+    Per ogni servizio Evo4Web specificato nel file di configurazione JSON,
+    esegue SEMPRE un ciclo forzato di stop+start ad ogni esecuzione, cosi'
+    da far ripartire processi rimasti in stallo e portare lo stato a Running
+    noto. Scrive log giornalieri nella cartella configurata.
 
     Pensato per essere eseguito da Task Scheduler con privilegi elevati.
 
@@ -23,7 +23,7 @@
 
 .NOTES
     Autore  : Daniele Oppezzo
-    Versione: 1.2
+    Versione: 1.4
 #>
 
 [CmdletBinding()]
@@ -114,6 +114,58 @@ function Resolve-LogRoot {
     return $resolved
 }
 
+function Get-ServiceVersion {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$ServiceName)
+
+    # Risolve il percorso dell'eseguibile associato al servizio.
+    try {
+        $svcWmi = Get-CimInstance -ClassName Win32_Service -Filter ("Name='{0}'" -f $ServiceName) -ErrorAction Stop
+    } catch {
+        return [pscustomobject]@{ Path = $null; FileVersion = $null; ProductVersion = $null; Error = $_.Exception.Message }
+    }
+
+    if (-not $svcWmi -or -not $svcWmi.PathName) {
+        return [pscustomobject]@{ Path = $null; FileVersion = $null; ProductVersion = $null; Error = 'PathName vuoto' }
+    }
+
+    # PathName puo' contenere argomenti tipo "C:\svc\svc.exe -arg". Prendi solo il primo token.
+    $raw = $svcWmi.PathName.Trim()
+    if ($raw.StartsWith('"')) {
+        $end = $raw.IndexOf('"', 1)
+        $path = if ($end -gt 0) { $raw.Substring(1, $end - 1) } else { $raw.Trim('"') }
+    } else {
+        $parts = $raw -split '\s+', 2
+        $path  = $parts[0]
+    }
+
+    if (-not (Test-Path -LiteralPath $path)) {
+        return [pscustomobject]@{ Path = $path; FileVersion = $null; ProductVersion = $null; Error = 'File non trovato' }
+    }
+
+    try {
+        $vi            = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($path)
+        $fileVersion   = $vi.FileVersion
+        $productVer    = $vi.ProductVersion
+        if (-not $fileVersion)  { $fileVersion  = $vi.FileMajorPart.ToString() + '.' + $vi.FileMinorPart.ToString() + '.' + $vi.FileBuildPart.ToString() + '.' + $vi.FilePrivatePart.ToString() }
+        if (-not $productVer)   { $productVer   = $vi.ProductMajorPart.ToString() + '.' + $vi.ProductMinorPart.ToString() + '.' + $vi.ProductBuildPart.ToString() + '.' + $vi.ProductPrivatePart.ToString() }
+    } catch {
+        return [pscustomobject]@{ Path = $path; FileVersion = $null; ProductVersion = $null; Error = $_.Exception.Message }
+    }
+
+    return [pscustomobject]@{ Path = $path; FileVersion = $fileVersion; ProductVersion = $productVer; Error = $null }
+}
+
+function Format-ServiceVersion {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$ServiceName)
+    $v = Get-ServiceVersion -ServiceName $ServiceName
+    if ($v.Error) {
+        return ("versione=N/D ({0}, path={1})" -f $v.Error, $v.Path)
+    }
+    return ("versione={0} (product={1}, path={2})" -f $v.FileVersion, $v.ProductVersion, $v.Path)
+}
+
 function Read-Config {
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$Path)
@@ -192,13 +244,12 @@ Write-Log -Level INFO    -Message "Log file: $script:LogFile"
 Write-Log -Level INFO    -Message "Servizi configurati: $($services -join ', ')"
 
 # --- Loop principale -------------------------------------------------------
-# Strategia: per ogni servizio che NON e' gia' Running, lo si forza
-# SEMPRE in stato Stopped e poi lo si riavvia. Serve a sbloccare situazioni
-# di stallo (StartPending, StopPending, Paused, ecc.) in cui il servizio
-# non sta effettivamente lavorando ma non e' neppure propriamente "Stopped".
+# Strategia: ogni esecuzione forza SEMPRE il ciclo stop+start su TUTTI i
+# servizi configurati, indipendentemente dal fatto che siano gia' Running.
+# Serve a far ripartire processi rimasti in stallo e ad allineare lo stato
+# a inizio ciclo noto (Stopped -> Running).
 $restarted = 0
 $failed    = 0
-$already   = 0
 
 $stopWait  = New-TimeSpan -Seconds $timeout
 $startWait = New-TimeSpan -Seconds $timeout
@@ -215,18 +266,12 @@ foreach ($svc in $services) {
     $currentStatus = $service.Status
     Write-Log -Level INFO -Message "Stato attuale di '$svc': $currentStatus"
 
-    if ($currentStatus -eq 'Running') {
-        Write-Log -Level INFO -Message "Servizio '$svc' gia' Running. Nessuna azione necessaria."
-        $already++
-        continue
-    }
+    # Log della versione del servizio, utile dopo il restart per confermare
+    # che stia girando il binario atteso.
+    Write-Log -Level INFO -Message ("Servizio '$svc' pre-restart - {0}" -f (Format-ServiceVersion -ServiceName $svc))
 
-    # Il servizio NON sta girando. Forza il reset completo:
-    # 1) Stop (anche se e' in StartPending/StopPending/Paused) con -Force
-    # 2) Attesa che diventi Stopped
-    # 3) Start
-    # 4) Attesa che diventi Running
-    Write-Log -Level WARN -Message "Servizio '$svc' non Running (stato: $currentStatus). Forzo stop + start per sbloccare eventuali stalli."
+    # Il servizio verra' SEMPRE fermato e riavviato.
+    Write-Log -Level INFO -Message "Servizio '$svc' - restart forzato (stato attuale: $currentStatus)."
 
     try {
         # 1) Stop forzato
@@ -259,7 +304,8 @@ foreach ($svc in $services) {
         $service.Refresh()
 
         if ($service.Status -eq 'Running') {
-            Write-Log -Level SUCCESS -Message "Servizio '$svc' riavviato con successo (era $currentStatus, ora Running). Stallo risolto."
+            Write-Log -Level SUCCESS -Message "Servizio '$svc' riavviato con successo (era $currentStatus, ora Running)."
+            Write-Log -Level INFO    -Message ("Servizio '$svc' post-restart - {0}" -f (Format-ServiceVersion -ServiceName $svc))
             $restarted++
         } else {
             Write-Log -Level ERROR -Message "Servizio '$svc' riavviato ma lo stato finale non e' Running: $($service.Status)."
@@ -271,7 +317,7 @@ foreach ($svc in $services) {
     }
 }
 
-Write-Log -Level INFO -Message "==== Ciclo terminato. Riavviati=$restarted Gia'Running=$already Falliti=$failed ===="
+Write-Log -Level INFO -Message "==== Ciclo terminato. Riavviati=$restarted Falliti=$failed ===="
 
 # --- Retention log ---------------------------------------------------------
 try {

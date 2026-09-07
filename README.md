@@ -1,10 +1,9 @@
 # Evo4Web Services Monitor
 
-Script PowerShell schedulato che controlla lo stato dei servizi Windows
-`Evo4Web - Engine*`. Per ogni servizio che non risulti `Running` forza lo
-**stop** (anche se è in `StartPending` / `StopPending` / `Paused`) e poi lo
-**riavvia** da zero, in modo da sbloccare situazioni di stallo.
-Scrive log giornalieri con rotazione automatica.
+Script PowerShell schedulato che ad ogni esecuzione esegue **sempre** un
+ciclo forzato di **stop + start** su tutti i servizi Windows `Evo4Web - Engine*`
+configurati, in modo da far ripartire processi rimasti in stallo e portare lo
+stato a `Running` noto. Scrive log giornalieri con rotazione automatica.
 
 ---
 
@@ -195,13 +194,15 @@ Evo4WebServices-20260908.log
 ```
 2026-09-07 14:32:00 [INFO]    ==== Avvio ciclo di monitoraggio servizi Evo4Web ====
 2026-09-07 14:32:00 [INFO]    Servizi configurati: Evo4Web - EngineB2B, Evo4Web - EnginePaNotifiche, ...
-2026-09-07 14:32:01 [INFO]    Stato attuale di 'Evo4Web - EngineB2B': StopPending
-2026-09-07 14:32:01 [WARN]    Servizio 'Evo4Web - EngineB2B' non Running (stato: StopPending). Forzo stop + start per sbloccare eventuali stalli.
+2026-09-07 14:32:01 [INFO]    Stato attuale di 'Evo4Web - EngineB2B': Running
+2026-09-07 14:32:01 [INFO]    Servizio 'Evo4Web - EngineB2B' pre-restart - versione=2.5.1.0 (product=2.5.1.0, path=C:\Evo4Web\EngineB2B.exe)
+2026-09-07 14:32:01 [INFO]    Servizio 'Evo4Web - EngineB2B' - restart forzato (stato attuale: Running).
 2026-09-07 14:32:01 [INFO]    Comando Stop-Service inviato a 'Evo4Web - EngineB2B'.
 2026-09-07 14:32:03 [INFO]    Servizio 'Evo4Web - EngineB2B' confermato Stopped.
 2026-09-07 14:32:03 [INFO]    Comando Start-Service inviato a 'Evo4Web - EngineB2B'.
-2026-09-07 14:32:06 [SUCCESS] Servizio 'Evo4Web - EngineB2B' riavviato con successo (era StopPending, ora Running). Stallo risolto.
-2026-09-07 14:32:07 [INFO]    ==== Ciclo terminato. Riavviati=1 Gia'Running=2 Falliti=0 ====
+2026-09-07 14:32:06 [SUCCESS] Servizio 'Evo4Web - EngineB2B' riavviato con successo (era Running, ora Running).
+2026-09-07 14:32:06 [INFO]    Servizio 'Evo4Web - EngineB2B' post-restart - versione=2.5.1.0 (product=2.5.1.0, path=C:\Evo4Web\EngineB2B.exe)
+2026-09-07 14:32:07 [INFO]    ==== Ciclo terminato. Riavviati=1 Falliti=0 ====
 ```
 
 ### Livelli
@@ -292,17 +293,17 @@ quella macchina. Apri `services.msc`, cerca il servizio e copia il
 
 ## Limitazioni note
 
-- Lo script esegue un singolo controllo puntuale per esecuzione. Non è un
-  watchdog continuo: più trigger frequenti = più controlli ravvicinati.
+- Lo script esegue un singolo controllo/restart per esecuzione. Non è un
+  watchdog continuo: più trigger frequenti = più restart ravvicinati.
 - Lo stop è forzato con `-Force` perché l'obiettivo è proprio sbloccare
-  stalli. Se vuoi escludere alcuni servizi da questa logica aggressiva,
-  toglili dal JSON.
-- Se tutti i servizi si spengono in contemporanea e dipendono l'uno
-  dall'altro, l'avvio potrebbe richiedere più di un'esecuzione. In quel
-  caso abbassa l'intervallo del trigger (es. 1-2 minuti).
-- Lo script non distingue crash da fermo intenzionale per i servizi che
-  sono in `Stopped` "puro": li riavvia comunque. In un contesto gestito
-  è il comportamento desiderato.
+  stalli e riavviare i processi in modo deterministico. Se vuoi escludere
+  alcuni servizi da questa logica, toglili dal JSON.
+- Se i servizi dipendono l'uno dall'altro, l'avvio potrebbe richiedere
+  più di un'esecuzione. In quel caso abbassa l'intervallo del trigger
+  (es. 1-2 minuti).
+- Lo script non distingue crash da fermo intenzionale: riavvia
+  incondizionatamente. In un contesto gestito è il comportamento
+  desiderato.
 
 ---
 
