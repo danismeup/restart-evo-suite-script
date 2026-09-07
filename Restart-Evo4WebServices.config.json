@@ -1,0 +1,12 @@
+{
+  "_comment": "Configurazione per Restart-Evo4WebServices.ps1. Modificare liberamente; lo script rilegge ad ogni esecuzione.",
+  "logRoot": "%ProgramData%\\smeup\\evo4b2b\\services\\restart\\logs",
+  "logPrefix": "Evo4WebServices",
+  "maxLogAgeDays": 30,
+  "serviceStartTimeoutSeconds": 30,
+  "services": [
+    "Evo4Web - EngineB2B",
+    "Evo4Web - EnginePaNotifiche",
+    "Evo4Web - EngineReceive"
+  ]
+}
